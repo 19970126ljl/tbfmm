@@ -204,7 +204,7 @@ public:
         unsigned char* srcLocal = (unsigned char*)STARPU_VARIABLE_GET_PTR(buffers[2]);
         size_t srcLocalSize = STARPU_VARIABLE_GET_ELEMSIZE(buffers[2]);
 
-        const CellContainerClass currentGroupCpu(srcData, srcDataSize, nullptr, 0, nullptr, 0);
+        const CellContainerClass currentGroupCpu(groupCellsData, groupCellsDataSize, nullptr, 0, nullptr, 0);
 
         CellContainerClass currentGroupCuda(srcData, srcDataSize, srcMultipole, srcMultipoleSize,
                                             srcLocal, srcLocalSize, false);

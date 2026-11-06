@@ -4,8 +4,6 @@
 ###########################################################################
 project(UTESTS_TBFMM CXX)
 
-ADD_DEFINITIONS(${TBFMM_CXX_FLAGS})
-
 # Find all code files (no GLOB_RECURSE)
 file(
     GLOB	
@@ -44,7 +42,7 @@ foreach(exec ${source_tests_files})
         add_executable(${execname} ${exec})
         
         if(TBFMM_USE_CUDA)
-            set_source_files_properties(${execname} PROPERTIES LANGUAGE CUDA)
+            set_source_files_properties(${exec} PROPERTIES LANGUAGE CUDA)
         endif()
 
         target_link_libraries(${execname} ${TBFMM_LIBRARIES})

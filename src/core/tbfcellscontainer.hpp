@@ -193,9 +193,9 @@ public:
     }
 
     auto getDataPtrsAndSizes() const{
-        return std::array<std::pair<const unsigned char*,size_t>,3>{std::pair<unsigned char*,size_t>{objectData.getPtr(), objectData.getAllocatedMemorySizeInByte()},
-                                                                 std::pair<unsigned char*,size_t>{objectMultipole.getPtr(), objectMultipole.getAllocatedMemorySizeInByte()},
-                                                                 std::pair<unsigned char*,size_t>{objectLocal.getPtr(), objectLocal.getAllocatedMemorySizeInByte()}};
+        return std::array<std::pair<const unsigned char*,size_t>,3>{std::pair<const unsigned char*,size_t>{objectData.getPtr(), objectData.getAllocatedMemorySizeInByte()},
+                                                                 std::pair<const unsigned char*,size_t>{objectMultipole.getPtr(), objectMultipole.getAllocatedMemorySizeInByte()},
+                                                                 std::pair<const unsigned char*,size_t>{objectLocal.getPtr(), objectLocal.getAllocatedMemorySizeInByte()}};
 
     }
 

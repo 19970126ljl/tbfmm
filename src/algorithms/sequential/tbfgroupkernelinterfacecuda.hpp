@@ -93,93 +93,54 @@ __global__ void M2M_core(const SpaceIndexType& spaceSystem, const long int inLev
 }
 
 
-template <class SpaceIndexType, class KernelClass, class CellGroupClass, class IndexClass>
-__global__ void M2LInGroup_core(const SpaceIndexType& spaceSystem, const long int inLevel,
-                                typename KernelClass::CudaKernelData inKernel,
-                                std::array<std::pair<unsigned char*,size_t>,3> ptrsAndSizeCells,
-                                const IndexClass* inIndexes,
-                                const long int inNbInteractionBlocks,
-                                const long int* inInteractionBlocks) {
-    CellGroupClass inCellGroup(ptrsAndSizeCells);
+// Compact device metadata: resolve spatial indexes on the host, then group all
+// interactions for a target together so exactly one block owns each target L.
+struct M2LInteraction {
+    long int source;
+    long int target;
+    long int direction;
+};
 
-    using CellMultipoleType = typename std::remove_reference<decltype(inCellGroup.getCellMultipole(0))>::type;
-    //using CellLocalType = typename std::remove_reference<decltype(inCellGroup.getCellLocal(0))>::type;
+template <class CellGroupClass>
+struct M2LNeighbors {
+    const CellGroupClass* group;
+    const M2LInteraction* interactions;
 
-    std::vector<std::reference_wrapper<const CellMultipoleType>> neighbors;
-    long int positionsOfNeighbors[spaceSystem.getNbInteractionsPerCell()];
+    struct Reference {
+        const typename CellGroupClass::MultipoleClass* value;
+        __device__ const auto& get() const { return *value; }
+    };
+    __device__ Reference operator[](const long int idx) const {
+        return {&group->getCellMultipole(interactions[idx].source)};
+    }
+};
 
+struct M2LPositions {
+    const M2LInteraction* interactions;
+    __device__ long int operator[](const long int idx) const {
+        return interactions[idx].direction;
+    }
+};
 
-    for(long int idxInteractionBlock = GetThreadId() ; idxInteractionBlock < inNbInteractionBlocks ; idxInteractionBlock += GetNbThreads()){
-        const auto interaction = inIndexes[inInteractionBlocks[idxInteractionBlock]];
-
-        auto& targetCell = inCellGroup.getCellLocal(interaction.globalTargetPos);
-        const long int nbNeighbors = inInteractionBlocks[idxInteractionBlock+1]-inInteractionBlocks[idxInteractionBlock];
-
-        for(long int idxInteraction = inInteractionBlocks[idxInteractionBlock] ; idxInteraction < inInteractionBlocks[idxInteractionBlock+1] ; ++idxInteraction){
-            auto foundSrc = inCellGroup.getElementFromSpacialIndex(inIndexes[idxInteraction].indexSrc);
-            assert(foundSrc);
-            assert(inCellGroup.getElementFromSpacialIndex(inIndexes[idxInteraction].indexTarget)
-                   && *inCellGroup.getElementFromSpacialIndex(inIndexes[idxInteraction].indexTarget) == inIndexes[idxInteraction].globalTargetPos);
-
-            assert(nbNeighbors < spaceSystem.getNbInteractionsPerCell());
-            neighbors.emplace_back(inCellGroup.getCellMultipole(*foundSrc));
-            positionsOfNeighbors[nbNeighbors] = inIndexes[idxInteraction].arrayIndexSrc;
-        }
-
-        KernelClass::M2LCuda(inKernel, inCellGroup.getCellSymbData(interaction.globalTargetPos),
-                         inLevel,
-                         TbfUtils::make_const(neighbors),
-                         positionsOfNeighbors,
-                         nbNeighbors,
-                         targetCell);
-        neighbors.clear();
+template <class KernelClass, class CellGroupClassTarget, class CellGroupClassSource>
+__global__ void M2L_core(const long int level, typename KernelClass::CudaKernelData kernel,
+                        std::array<std::pair<unsigned char*,size_t>,3> targetPtrs,
+                        std::array<std::pair<const unsigned char*,size_t>,3> sourcePtrs,
+                        const M2LInteraction* interactions, const long int* offsets,
+                        const long int nbTargets) {
+    CellGroupClassTarget targets(targetPtrs);
+    const CellGroupClassSource sources(const_cast<unsigned char*>(sourcePtrs[0].first), sourcePtrs[0].second,
+                                      const_cast<unsigned char*>(sourcePtrs[1].first), sourcePtrs[1].second,
+                                      nullptr, 0);
+    for(long int idx = blockIdx.x; idx < nbTargets; idx += gridDim.x){
+        const long int begin = offsets[idx];
+        const long int target = interactions[begin].target;
+        KernelClass::M2LCuda(kernel, targets.getCellSymbData(target), level,
+                            M2LNeighbors<CellGroupClassSource>{&sources, interactions+begin},
+                            M2LPositions{interactions+begin}, offsets[idx+1]-begin,
+                            targets.getCellLocal(target));
     }
 }
-
-template <class SpaceIndexType, class KernelClass, class CellGroupClassTarget, class CellGroupClassSource, class IndexClass>
-__global__ void M2LBetweenGroups_core(const SpaceIndexType& spaceSystem, const long int inLevel,
-                                      typename KernelClass::CudaKernelData inKernel,
-                                      std::array<std::pair<unsigned char*,size_t>,3> ptrsAndSizeCells,
-                                      std::array<std::pair<unsigned char*,size_t>,3> ptrsAndSizeOther,
-                                      const IndexClass* inIndexes,
-                                      const long int inNbInteractionBlocks, const long int* inInteractionBlocksOffset,
-                                      const long int* inInteractionBlockIdxs, const long int* inFoundSrcIdxs) {
-    CellGroupClassTarget inCellGroup(ptrsAndSizeCells);
-    const CellGroupClassSource inOtherCellGroup(ptrsAndSizeOther);
-
-    using CellMultipoleType = typename std::remove_reference<decltype(inOtherCellGroup.getCellMultipole(0))>::type;
-    //using CellLocalType = typename std::remove_reference<decltype(inCellGroup.getCellLocal(0))>::type;
-
-    std::vector<std::reference_wrapper<const CellMultipoleType>> neighbors;
-    long int positionsOfNeighbors[spaceSystem.getNbInteractionsPerCell()];
-
-    for(long int idxInteractionBlock = GetThreadId() ; idxInteractionBlock < inNbInteractionBlocks ; idxInteractionBlock += GetNbThreads()){
-        const auto interaction = inIndexes[inInteractionBlockIdxs[inInteractionBlocksOffset[idxInteractionBlock]]];
-        auto& targetCell = inCellGroup.getCellLocal(interaction.globalTargetPos);
-
-        const long int nbNeighbors = inInteractionBlocksOffset[idxInteractionBlock+1]-inInteractionBlocksOffset[idxInteractionBlock];
-
-        for(long int idxNeigh = 0 ; idxNeigh < nbNeighbors ; ++idxNeigh){
-            const long int idxInteraction = inInteractionBlockIdxs[inInteractionBlocksOffset[idxInteractionBlock] + idxNeigh];
-            assert(inCellGroup.getElementFromSpacialIndex(inIndexes[idxInteraction].indexTarget)
-                   && *inCellGroup.getElementFromSpacialIndex(inIndexes[idxInteraction].indexTarget) == inIndexes[idxInteraction].globalTargetPos);
-
-            assert(idxNeigh < spaceSystem.getNbInteractionsPerCell());
-            neighbors.emplace_back(inOtherCellGroup.getCellMultipole(inFoundSrcIdxs[idxInteraction]));
-            positionsOfNeighbors[idxNeigh] = inIndexes[idxInteraction].arrayIndexSrc;
-        }
-
-        KernelClass::M2LCuda(inKernel, inCellGroup.getCellSymbData(interaction.globalTargetPos),
-                         inLevel,
-                         TbfUtils::make_const(neighbors),
-                         positionsOfNeighbors,
-                         nbNeighbors,
-                         targetCell);
-        neighbors.clear();
-    }
-}
-
-
 
 template <class SpaceIndexType, class KernelClass, class CellGroupClass>
 __global__ void L2L_core(const SpaceIndexType& spaceSystem, const long int inLevel,
@@ -297,6 +258,7 @@ class DeviceUniquePtr{
 public:
     DeviceUniquePtr(const std::vector<ObjectType>& inData, cudaStream_t inCuStream)
         : data(nullptr), nbElements(inData.size()), cuStream(inCuStream) {
+        if(nbElements == 0) return;
         cudaError_t err = cudaMallocAsync(&data, nbElements * sizeof(ObjectType), cuStream);
         if (err != cudaSuccess) {
             throw std::runtime_error("Error allocating CUDA memory");
@@ -310,7 +272,9 @@ public:
 
     void release(){
         if (data) {
-            cudaFreeAsync(data, cuStream);
+            CUDA_ASSERT(cudaFreeAsync(data, cuStream));
+            data = nullptr;
+            nbElements = 0;
         }
     }
 
@@ -463,98 +427,53 @@ public:
     void M2LInGroup(cudaStream_t currentStream,
                     const long int inLevel, KernelClass& inKernel, const CellGroupClass& inCellGroup,
                     CellGroupClass& inCellGroupCuda, const IndexClass& inIndexes) const {
-        using CellMultipoleType = typename std::remove_reference<decltype(inCellGroup.getCellMultipole(0))>::type;
-        //using CellLocalType = typename std::remove_reference<decltype(inCellGroup.getCellLocal(0))>::type;
-
-        std::vector<long int> interactionBlocks;
-        interactionBlocks.emplace_back(0);
-
-        long int idxInteraction = 0;
-
-        while(idxInteraction < static_cast<long int>(inIndexes.size())){
-            const auto interaction = inIndexes[idxInteraction];
-
-            long int nbNeighbors = 0;
-
-            do{
-                auto foundSrc = inCellGroup.getElementFromSpacialIndex(inIndexes[idxInteraction].indexSrc);
-                assert(foundSrc);
-                assert(inCellGroup.getElementFromSpacialIndex(inIndexes[idxInteraction].indexTarget)
-                       && *inCellGroup.getElementFromSpacialIndex(inIndexes[idxInteraction].indexTarget) == inIndexes[idxInteraction].globalTargetPos);
-
-                assert(nbNeighbors < spaceSystem.getNbInteractionsPerCell());
-                nbNeighbors += 1;
-
-                idxInteraction += 1;
-            } while(idxInteraction < static_cast<long int>(inIndexes.size())
-                    && interaction.indexTarget == inIndexes[idxInteraction].indexTarget);
-
-            assert(idxInteraction == nbNeighbors + interactionBlocks.size());
-            interactionBlocks.emplace_back(idxInteraction);
-        }
-
-        TbfGroupKernelInterfaceCuda_core::M2LInGroup_core<SpaceIndexType, KernelClass, CellGroupClass, IndexClass><<<64,256,0,currentStream>>>(spaceSystem, inLevel,
-                                                                                      inKernel.getCudaKernelData(),
-                                                                                      inCellGroupCuda.getDataPtrsAndSizes(), inIndexes.data(),
-                                  static_cast<long int>(interactionBlocks.size()), interactionBlocks.data());
-        [[maybe_unused]] auto cudaRes = cudaStreamSynchronize(currentStream);
-        CUDA_ASSERT(cudaRes);
+        M2LBetweenGroups(currentStream, inLevel, inKernel, inCellGroup, inCellGroup,
+                         inCellGroupCuda, inCellGroupCuda, inIndexes);
     }
-
 
     template <class KernelClass, class CellGroupClassTarget, class CellGroupClassSource, class IndexClass>
     void M2LBetweenGroups(cudaStream_t currentStream,
                           const long int inLevel, KernelClass& inKernel, const CellGroupClassTarget& inCellGroup,
                           const CellGroupClassSource& inOtherCellGroup, CellGroupClassTarget& inCellGroupCuda,
                           const CellGroupClassSource& inOtherCellGroupCuda, const IndexClass& inIndexes) const {
-        using CellMultipoleType = typename std::remove_reference<decltype(inOtherCellGroup.getCellMultipole(0))>::type;
-        //using CellLocalType = typename std::remove_reference<decltype(inCellGroup.getCellLocal(0))>::type;
-
-        std::vector<long int> offsetInteractionIdxs;
-        offsetInteractionIdxs.emplace_back(0);
-        std::vector<long int> interactionIdxs;
-        std::vector<long int> foundSrcIdxs;
-
-        long int idxInteraction = 0;
-
-        while(idxInteraction < static_cast<long int>(inIndexes.size())){
-            const auto interaction = inIndexes[idxInteraction];
-
-            long int nbNeighbors = 0;
-
-            do{
-                auto foundSrc = inOtherCellGroup.getElementFromSpacialIndex(inIndexes[idxInteraction].indexSrc);
-                if(foundSrc != -1){
-                    assert(inCellGroup.getElementFromSpacialIndex(inIndexes[idxInteraction].indexTarget)
-                          && *inCellGroup.getElementFromSpacialIndex(inIndexes[idxInteraction].indexTarget) == inIndexes[idxInteraction].globalTargetPos);
-
-                    assert(nbNeighbors < spaceSystem.getNbInteractionsPerCell());
-                    nbNeighbors += 1;
-
-                    interactionIdxs.emplace_back(idxInteraction);
-                    foundSrcIdxs.emplace_back(foundSrc);
-                }
-
-                idxInteraction += 1;
-            } while(idxInteraction < static_cast<long int>(inIndexes.size())
-                    && interaction.indexTarget == inIndexes[idxInteraction].indexTarget);
-
-            if(nbNeighbors){
-                offsetInteractionIdxs.emplace_back(interactionIdxs.size());
-            }
+        using Interaction = TbfGroupKernelInterfaceCuda_core::M2LInteraction;
+        std::vector<Interaction> interactions;
+        interactions.reserve(inIndexes.size());
+        for(const auto& interaction : inIndexes){
+            const auto source = inOtherCellGroup.getElementFromSpacialIndex(interaction.indexSrc);
+            if(!source) continue; // Sparse groups can contain gaps in their index range.
+            const auto target = inCellGroup.getElementFromSpacialIndex(interaction.indexTarget);
+            assert(target && *target == interaction.globalTargetPos);
+            assert(interaction.arrayIndexSrc >= 0 && interaction.arrayIndexSrc < 343);
+            interactions.push_back({*source, *target, interaction.arrayIndexSrc});
         }
+        if(interactions.empty()) return;
 
-        TbfGroupKernelInterfaceCuda_core::M2LBetweenGroups_core<SpaceIndexType, KernelClass, CellGroupClassTarget, CellGroupClassSource, IndexClass><<<64,256,0,currentStream>>>(spaceSystem, inLevel,
-                                                                                         inKernel.getCudaKernelData(),
-                                                                                         inCellGroupCuda.getDataPtrsAndSizes(),
-                                                                                         inOtherCellGroup.getDataPtrsAndSizes(),
-                                                                                         inIndexes.data(),
-                              offsetInteractionIdxs.size(), offsetInteractionIdxs.data(),
-                              interactionIdxs.data(), foundSrcIdxs.data());
-        [[maybe_unused]] auto cudaRes = cudaStreamSynchronize(currentStream);
-        CUDA_ASSERT(cudaRes);
+        std::stable_sort(interactions.begin(), interactions.end(), [](const auto& a, const auto& b){
+            return a.target < b.target;
+        });
+        std::vector<long int> offsets{0};
+        for(long int idx = 1; idx < static_cast<long int>(interactions.size()); ++idx){
+            if(interactions[idx].target != interactions[idx-1].target) offsets.push_back(idx);
+        }
+        offsets.push_back(static_cast<long int>(interactions.size()));
+        const long int nbTargets = static_cast<long int>(offsets.size())-1;
+        auto deviceInteractions = MakeDeviceUniquePtr(interactions, currentStream);
+        auto deviceOffsets = MakeDeviceUniquePtr(offsets, currentStream);
+        const int nbBlocks = static_cast<int>(std::min(nbTargets, 65535L));
+        TbfGroupKernelInterfaceCuda_core::M2L_core<KernelClass, CellGroupClassTarget, CellGroupClassSource>
+            <<<nbBlocks,128,0,currentStream>>>(inLevel, inKernel.getCudaKernelData(),
+                                             inCellGroupCuda.getDataPtrsAndSizes(),
+                                             inOtherCellGroupCuda.getDataPtrsAndSizes(),
+                                             deviceInteractions.device_ptr(), deviceOffsets.device_ptr(), nbTargets);
+        CUDA_ASSERT(cudaGetLastError());
+        deviceInteractions.release();
+        deviceOffsets.release();
+        // These codelets use StarPU's synchronous CUDA completion contract.
+        // Finish both the kernel and metadata transfers before host staging dies
+        // and before StarPU releases readers/writers of the target handle.
+        CUDA_ASSERT(cudaStreamSynchronize(currentStream));
     }
-
 
     template <class KernelClass, class CellGroupClass>
     void L2L(cudaStream_t currentStream,

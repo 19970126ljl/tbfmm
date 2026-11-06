@@ -135,6 +135,32 @@ ctest --test-dir build-sanitize --output-on-failure \
   -R 'utest-(tree-regressions|memoryblock|blocksizefinder|accuracychecker)$'
 ```
 
+### StarPU CUDA rotation M2L
+
+`FRotationKernel` provides CPU and CUDA implementations of M2L (both within and
+between cell groups) and P2P. Other stages execute on CPU workers. M2L assigns a
+target cell to a CUDA block and expansion coefficients to threads, reuses
+intermediates in shared memory, and accumulates outputs in thread-local storage.
+Read-only rotation/translation tables are uploaded once per CUDA worker. The
+codelets use the StarPU local stream and synchronize it before returning.
+
+With a CUDA-enabled StarPU installation in `STARPU_DIR`, build the focused test
+as follows (set the architecture to match the GPU; `80` is for A100/A800):
+
+```bash
+cmake -S . -B build-starpu-cuda -DBUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Release \
+  -DTBFMM_USE_STARPU="$STARPU_DIR" -DTBFMM_USE_CUDA=ON \
+  -DCMAKE_CUDA_ARCHITECTURES=80 -DTBFMM_ENABLE_SPECX=OFF \
+  -DTBFMM_ENABLE_INASTEMP=OFF -DTBFMM_ENABLE_FFTW=OFF -DTBFMM_ENABLE_OPENMP=OFF
+cmake --build build-starpu-cuda --target utest-rotationkernel-m2l-starpu-cuda --parallel 2
+STARPU_NCPU=2 STARPU_NCUDA=1 build-starpu-cuda/unit-tests/utest-rotationkernel-m2l-starpu-cuda
+```
+
+The test forces M2L onto CUDA, compares individual expansion coefficients and
+full-FMM particle results with the CPU implementation, checks that M2L executed
+on CUDA, and reports task counts per GPU. Set `STARPU_NCUDA=2` for two GPUs; `--quick` selects
+smaller cases suitable for Compute Sanitizer.
+
 ## How to Compile on Windows
 First, you need to install a MSYS2 MinGW build envirnment following extensive instructions provided in the links below
 

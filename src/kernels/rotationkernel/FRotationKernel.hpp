@@ -14,6 +14,9 @@
 
 #ifdef __NVCC__
 #include "kernels/P2P/TbfP2PCuda.hpp"
+#include "FRotationM2LCuda.hpp"
+#include <stdexcept>
+#include <vector>
 #endif
 
 /** This is a recursion to get the minimal size of the matrix dlmk
@@ -51,6 +54,19 @@ public:
     using SpacialConfiguration = TbfSpacialConfiguration<RealType, SpaceIndexType::Dim>;
 
 private:
+#ifdef __NVCC__
+    using RotationCuda = FRotationM2LCuda<RealType, P>;
+    // Copies of a host kernel start without device ownership. Each CUDA worker
+    // initializes and releases its own tables on its current device.
+    typename RotationCuda::Data cudaKernelData{};
+
+    static void CheckCuda(const cudaError_t result){
+        if(result != cudaSuccess){
+            throw std::runtime_error(cudaGetErrorString(result));
+        }
+    }
+#endif
+
     const RealType PI = RealType(3.14159265358979323846264338327950288419716939937510582097494459230781640628620899863L);
     const RealType PIDiv2 = RealType(3.14159265358979323846264338327950288419716939937510582097494459230781640628620899863L/2.0);
     const RealType PI2 = RealType(3.14159265358979323846264338327950288419716939937510582097494459230781640628620899863L*2.0);
@@ -1419,17 +1435,84 @@ public:
 #ifdef __NVCC__
     static constexpr bool CpuP2P = true;
     static constexpr bool CudaP2P = true;
+    static constexpr bool CpuM2L = true;
+    static constexpr bool CudaM2L = true;
 
-    struct CudaKernelData{ bool notUsed; };
+    using CudaKernelData = typename RotationCuda::Data;
 
-    void initCudaKernelData(const cudaStream_t& /*inStream*/){
+    void initCudaKernelData(const cudaStream_t& inStream){
+        assert(cudaKernelData.translation == nullptr);
+        // Transpose the packed CPU rotation matrices for coefficient-parallel
+        // loads, and split complex phases into contiguous real/imaginary planes.
+        std::vector<RealType> translation(treeHeight*343*(P+1), RealType(0));
+        std::vector<RealType> phase(343*2*SizeArray, RealType(0));
+        std::vector<RealType> forward(343*RotationCuda::RotationSize, RealType(0));
+        std::vector<RealType> backward(forward.size(), RealType(0));
+        for(int direction = 0; direction < 343; ++direction){
+            const int x = direction/49-3;
+            const int y = (direction/7)%7-3;
+            const int z = direction%7-3;
+            if(std::abs(x) <= 1 && std::abs(y) <= 1 && std::abs(z) <= 1) continue;
+            for(int level = 1; level < treeHeight; ++level){
+                for(int idx = 0; idx <= P; ++idx){
+                    translation[(level*343+direction)*(P+1)+idx] = M2LTranslationCoef[level][direction][idx];
+                }
+            }
+            for(int idx = 0; idx < SizeArray; ++idx){
+                phase[direction*2*SizeArray+idx] = rotationM2LExpMinusImPhi[direction][idx].real();
+                phase[direction*2*SizeArray+SizeArray+idx] = rotationM2LExpMinusImPhi[direction][idx].imag();
+            }
+            int packed = 0;
+            for(int l = 0; l <= P; ++l){
+                for(int m = 0; m <= l; ++m){
+                    const int idx = l*(l+1)/2+m;
+                    for(int k = 0; k <= 2*l; ++k, ++packed){
+                        const int dest = direction*RotationCuda::RotationSize+k*SizeArray+idx;
+                        forward[dest] = DlmkCoefM2LOTheta[direction][packed];
+                        backward[dest] = DlmkCoefM2LMMinusTheta[direction][packed];
+                    }
+                }
+            }
+        }
+        try{
+            const auto upload = [&](RealType*& device, const std::vector<RealType>& host){
+                CheckCuda(cudaMalloc(&device, host.size()*sizeof(RealType)));
+                CheckCuda(cudaMemcpyAsync(device, host.data(), host.size()*sizeof(RealType), cudaMemcpyHostToDevice, inStream));
+            };
+            upload(cudaKernelData.translation, translation);
+            upload(cudaKernelData.phase, phase);
+            upload(cudaKernelData.forward, forward);
+            upload(cudaKernelData.backward, backward);
+            // Host staging vectors can be destroyed after the uploads complete.
+            CheckCuda(cudaStreamSynchronize(inStream));
+        }
+        catch(...){
+            releaseCudaKernelData(inStream);
+            throw;
+        }
     }
 
-    auto getCudaKernelData(){
-        return CudaKernelData();
+    auto getCudaKernelData() const{
+        return cudaKernelData;
     }
 
-    void releaseCudaKernelData(const cudaStream_t& /*inStream*/){
+    void releaseCudaKernelData(const cudaStream_t& inStream){
+        CheckCuda(cudaStreamSynchronize(inStream));
+        CheckCuda(cudaFree(cudaKernelData.translation));
+        CheckCuda(cudaFree(cudaKernelData.phase));
+        CheckCuda(cudaFree(cudaKernelData.forward));
+        CheckCuda(cudaFree(cudaKernelData.backward));
+        cudaKernelData = CudaKernelData{};
+    }
+
+    // Collective device operation: every thread in a block must participate.
+    template <class CellSymbolicData, class CellClassContainer, class Positions, class CellClass>
+    __device__ static void M2LCuda(const CudaKernelData& data, const CellSymbolicData&,
+                                  const long int level, const CellClassContainer& neighbors,
+                                  const Positions& positions, const long int nbNeighbors,
+                                  CellClass& output){
+        RotationCuda::Apply(data, level, neighbors, positions, nbNeighbors,
+                            reinterpret_cast<RealType*>(output.data()));
     }
 
     template <class LeafSymbolicDataSource, class ParticlesClassValuesSource, class LeafSymbolicDataTarget, class ParticlesClassValuesTarget, class ParticlesClassRhs>

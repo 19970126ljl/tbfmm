@@ -11,6 +11,9 @@ set(CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/deps/CMakeModules/")
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_CUDA_STANDARD 17)
+set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+set(CMAKE_CUDA_EXTENSIONS OFF)
 
 if(APPLE)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17")
@@ -251,12 +254,16 @@ message(STATUS "Available compilation keys are: ${TBF_USE_LIST}")
 string(TOUPPER "${CMAKE_BUILD_TYPE}" CMAKE_BUILD_TYPE_UPPERCASE)
 
 if(TBFMM_USE_CUDA AND (CMAKE_BUILD_TYPE_UPPERCASE STREQUAL "DEBUG" OR CMAKE_BUILD_TYPE_UPPERCASE STREQUAL "RELWITHDEBINFO"))
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -G -g")
     set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -G -g")
     message(STATUS "CMAKE_CUDA_FLAGS = ${CMAKE_CUDA_FLAGS}")
 endif()
 if(TBFMM_USE_CUDA)
-    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} ${CMAKE_CXX_FLAGS}")
+    # Host flags such as -march=native and -fopenmp must reach the host
+    # compiler through nvcc, rather than being interpreted as CUDA options.
+    separate_arguments(TBFMM_CUDA_HOST_FLAGS NATIVE_COMMAND "${CMAKE_CXX_FLAGS}")
+    foreach(host_flag IN LISTS TBFMM_CUDA_HOST_FLAGS)
+        string(APPEND CMAKE_CUDA_FLAGS " -Xcompiler=${host_flag}")
+    endforeach()
 endif()
 
 message(STATUS "CMAKE_CXX_FLAGS = ${CMAKE_CXX_FLAGS}")
