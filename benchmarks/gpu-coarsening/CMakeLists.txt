@@ -15,6 +15,16 @@ set(CMAKE_REQUIRED_INCLUDES ${TBFMM_STARPU_INCLUDE_DIRS} ${CMAKE_CUDA_TOOLKIT_IN
 set(CMAKE_REQUIRED_LIBRARIES ${TBFMM_COARSENING_STARPU_LIBRARY})
 check_cxx_source_compiles("
 #include <starpu.h>
+#ifdef STARPU_HAVE_HWLOC
+#error Linux OS CPU numbering requires StarPU built without hwloc
+#endif
+int main() { return 0; }
+" TBFMM_COARSENING_OS_CPU_NUMBERING)
+if(NOT TBFMM_COARSENING_OS_CPU_NUMBERING)
+    message(FATAL_ERROR "GPU coarsening CPU arguments use Linux OS numbering; select a StarPU runtime built without hwloc (--without-hwloc)")
+endif()
+check_cxx_source_compiles("
+#include <starpu.h>
 #include <starpu_coarsening.h>
 int main() {
     starpu_codelet cl{};

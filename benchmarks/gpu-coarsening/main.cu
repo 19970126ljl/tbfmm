@@ -218,6 +218,18 @@ int main(int argc, char** argv) {
         auto args = parse(argc, argv);
         std::ofstream out(args.output);
         if(!out) throw std::runtime_error("Cannot open output");
+        starpu_conf runtime;
+        configureRuntime(args, runtime);
+        if(args.prepareModels) {
+            // Bus-only startup: calibration threads inherit the bound main CPU.
+            runtime.ncpus = 0;
+            runtime.use_explicit_workers_bindid = 0;
+            const int status = starpu_init(&runtime);
+            if(status) throw std::runtime_error("Bus model preparation failed");
+            starpu_shutdown();
+            out << "{\"purpose\":\"model-preparation\",\"pass\":true}\n";
+            return 0;
+        }
         std::mt19937 rng(args.seed);
         std::uniform_real_distribution<Real> uniform(0, 1);
         std::normal_distribution<Real> normal(0, 0.065);
@@ -243,18 +255,6 @@ int main(int argc, char** argv) {
         referenceAlgorithm.execute(referenceTree);
         const auto reference = collect(referenceTree, particles.size());
 #endif
-        starpu_conf runtime;
-        configureRuntime(args, runtime);
-        if(args.prepareModels) {
-            // Bus-only startup: calibration threads inherit the bound main CPU.
-            runtime.ncpus = 0;
-            runtime.use_explicit_workers_bindid = 0;
-            const int status = starpu_init(&runtime);
-            if(status) throw std::runtime_error("Bus model preparation failed");
-            starpu_shutdown();
-            out << "{\"purpose\":\"model-preparation\",\"pass\":true}\n";
-            return 0;
-        }
         auto algorithm = std::make_unique<GpuAlgorithm>(config, TbfDefaultLastLevel, args.options);
         if(sched_getcpu() != args.mainCpu) throw std::runtime_error("Main thread CPU binding changed");
         if(starpu_cuda_worker_get_count() != unsigned(args.gpus) || starpu_cpu_worker_get_count() != unsigned(args.cpuWorkers))

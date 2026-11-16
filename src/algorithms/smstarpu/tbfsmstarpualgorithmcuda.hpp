@@ -76,6 +76,18 @@ protected:
 
     using KernelCapabilities = TbfAlgorithmUtils::KernelHardwareSupport<KernelClass>;
 
+    void validateCudaOptions() const {
+        cudaOptions.validate();
+        if constexpr(!KernelCapabilities::CudaM2L){
+            if(cudaOptions.m2l())
+                throw std::invalid_argument("M2L aggregation requires a kernel with CUDA M2L support");
+        }
+        if constexpr(!KernelCapabilities::CudaP2P){
+            if(cudaOptions.p2p())
+                throw std::invalid_argument("P2P aggregation requires a kernel with CUDA P2P support");
+        }
+    }
+
     template<class CellContainerClass, class ParticleContainerClass>
     void initCodelet(){
         memset(&p2m_cl, 0, sizeof(p2m_cl));
@@ -209,7 +221,12 @@ protected:
         m2l_cl_between_groups.modes[3] = starpu_data_access_mode(STARPU_RW|STARPU_COMMUTE);
         m2l_cl_between_groups.name = "m2l_cl_between_groups";
 #ifdef TBFMM_USE_GPU_COARSENING
-        if(cudaOptions.m2l()){m2lBetweenVariant=TbfSmStarpuCallbacksCuda::M2LVariant<ThisClass,CellContainerClass,true>(cudaOptions);m2l_cl_between_groups.coarsened_variant=&m2lBetweenVariant;}
+        if constexpr(KernelCapabilities::CudaM2L){
+            if(cudaOptions.m2l()){
+                m2lBetweenVariant=TbfSmStarpuCallbacksCuda::M2LVariant<ThisClass,CellContainerClass,true>(cudaOptions);
+                m2l_cl_between_groups.coarsened_variant=&m2lBetweenVariant;
+            }
+        }
 #endif
 
         memset(&m2l_cl_inside, 0, sizeof(m2l_cl_inside));
@@ -229,7 +246,12 @@ protected:
         m2l_cl_inside.modes[2] = starpu_data_access_mode(STARPU_RW|STARPU_COMMUTE);
         m2l_cl_inside.name = "m2l_cl_inside";
 #ifdef TBFMM_USE_GPU_COARSENING
-        if(cudaOptions.m2l()){m2lInsideVariant=TbfSmStarpuCallbacksCuda::M2LVariant<ThisClass,CellContainerClass,false>(cudaOptions);m2l_cl_inside.coarsened_variant=&m2lInsideVariant;}
+        if constexpr(KernelCapabilities::CudaM2L){
+            if(cudaOptions.m2l()){
+                m2lInsideVariant=TbfSmStarpuCallbacksCuda::M2LVariant<ThisClass,CellContainerClass,false>(cudaOptions);
+                m2l_cl_inside.coarsened_variant=&m2lInsideVariant;
+            }
+        }
 #endif
 
         p2m_cl_model.type = STARPU_HISTORY_BASED;
@@ -607,7 +629,7 @@ public:
         priorities(configuration.getTreeHeight()){
         kernels.emplace_back(configuration);
 
-        cudaOptions.validate();
+        validateCudaOptions();
         const int ret = starpu_init(cudaOptions.runtime);
         if(ret)throw std::runtime_error("StarPU initialization failed: "+std::to_string(ret));
 
@@ -637,7 +659,7 @@ public:
         priorities(configuration.getTreeHeight()){
         kernels.emplace_back(std::forward<SourceKernelClass>(inKernel));
 
-        cudaOptions.validate();
+        validateCudaOptions();
         const int ret = starpu_init(cudaOptions.runtime);
         if(ret)throw std::runtime_error("StarPU initialization failed: "+std::to_string(ret));
 

@@ -15,7 +15,9 @@ The required interface is `starpu_codelet::coarsened_variant`,
 `starpu_coarsening_configure`, and `starpu_coarsening_get_stats`.
 CMake checks the selected headers and library together. A stock StarPU build
 can be used for the existing examples; this additional benchmark requires the
-extension.
+extension. The benchmark requires StarPU built without hwloc (`--without-hwloc`)
+so that all CPU arguments use Linux OS CPU numbering; CMake rejects hwloc builds.
+The runtime build command below already selects this configuration.
 
 The integration was checked with GCC 12.1, CUDA 12.9 and the runtime ABI header
 at task-coarsening commit `f188caa2a1e2603c06e39d78262ec79335c9f625`
@@ -85,8 +87,9 @@ numactl --membind=0 "$exe/gpu-coarsening-benchmark" \
   --model-directory "$PWD/models" --warmup 1 --repeats 4 --output both.json
 ```
 
-`--prepare-models 1` performs bus-only initialization, with calibration threads
-inheriting the bound main CPU, then exits without executing FMM. Prepare the
+`--prepare-models 1` performs bus-only initialization in either executable, with
+calibration threads inheriting the bound main CPU, then exits before particle
+generation or any CPU/GPU FMM execution. Prepare the
 model directory on the selected hardware before validation/timing and keep it
 frozen for comparisons. For two GPUs, prepare with `--gpus 2` and provide two
 GPU-driver cores followed by the same four CPU-worker cores.
@@ -107,6 +110,9 @@ the corresponding variants; it does not cache tree interaction structure.
 Compatibility is checked on a complete proposal; no application `can_append`
 callback repeatedly scans prefixes. Workspace cleanup runs on the owning
 CUDA workers before runtime shutdown.
+When using the algorithm interface directly, each requested aggregation mode
+requires the corresponding kernel CUDA capability. Unsupported modes fail before
+runtime initialization; single mode and unrelated operators remain available.
 
 ## Measurement scope
 
