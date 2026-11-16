@@ -37,7 +37,7 @@ protected:
     std::list<VecOfIndexes> vecIndexBuffer;
     TbfStarpuCudaOptions cudaOptions;
 #ifdef TBFMM_USE_GPU_COARSENING
-    starpu_coarsened_variant m2lBetweenVariant{},m2lInsideVariant{};
+    starpu_coarsened_variant m2lBetweenVariant{},m2lInsideVariant{},p2pBetweenVariant{},p2pInsideVariant{};
 #endif
 
 
@@ -159,6 +159,14 @@ protected:
         p2p_cl_oneleaf.modes[0] = STARPU_R;
         p2p_cl_oneleaf.modes[1] = starpu_data_access_mode(STARPU_RW|STARPU_COMMUTE);
         p2p_cl_oneleaf.name = "p2p_cl_oneleaf";
+#ifdef TBFMM_USE_GPU_COARSENING
+        if constexpr(KernelCapabilities::CudaP2P){
+            p2p_cl_oneleaf.cuda_funcs[0]=&TbfSmStarpuCallbacksCuda::P2PIntraAsyncCallback<ThisClass,ParticleContainerClass>;
+            p2p_cl_oneleaf.cuda_flags[0]=STARPU_CUDA_ASYNC;
+            if(cudaOptions.p2p()){p2pInsideVariant=TbfSmStarpuCallbacksCuda::P2PIntraVariant<ThisClass,ParticleContainerClass>(cudaOptions);p2p_cl_oneleaf.coarsened_variant=&p2pInsideVariant;}
+        }
+
+#endif
         memset(&p2p_cl_twoleaves, 0, sizeof(p2p_cl_twoleaves));
         if constexpr(KernelCapabilities::CpuP2P){
             p2p_cl_twoleaves.cpu_funcs[0] = &TbfSmStarpuCallbacks::P2PBetweenLeavesCallback<ThisClass, ParticleContainerClass>;
@@ -175,6 +183,14 @@ protected:
         p2p_cl_twoleaves.modes[2] = STARPU_R;
         p2p_cl_twoleaves.modes[3] = starpu_data_access_mode(STARPU_RW|STARPU_COMMUTE);
         p2p_cl_twoleaves.name = "p2p_cl_twoleaves";
+#ifdef TBFMM_USE_GPU_COARSENING
+        if constexpr(KernelCapabilities::CudaP2P){
+            p2p_cl_twoleaves.cuda_funcs[0]=&TbfSmStarpuCallbacksCuda::P2PAsyncCallback<ThisClass,ParticleContainerClass>;
+            p2p_cl_twoleaves.cuda_flags[0]=STARPU_CUDA_ASYNC;
+            if(cudaOptions.p2p()){p2pBetweenVariant=TbfSmStarpuCallbacksCuda::P2PVariant<ThisClass,ParticleContainerClass>(cudaOptions);p2p_cl_twoleaves.coarsened_variant=&p2pBetweenVariant;}
+        }
+
+#endif
         memset(&m2l_cl_between_groups, 0, sizeof(m2l_cl_between_groups));
         if constexpr(KernelCapabilities::CpuM2L){
             m2l_cl_between_groups.cpu_funcs[0] = &TbfSmStarpuCallbacks::M2LCallback<ThisClass, CellContainerClass>;
@@ -656,6 +672,12 @@ public:
                 kernels[starpu_worker_get_id()].releaseCudaKernelData(starpu_cuda_get_local_stream());
             });
         }
+#ifdef TBFMM_USE_GPU_COARSENING
+        TbStarPUUtils::ExecOnWorkers(STARPU_CUDA,[&](){TbfGroupKernelInterfaceCuda_core::GetP2PWorkspace().release();
+            TbfGroupKernelInterfaceCuda_core::GetP2PWideWorkspace().release();
+            TbfGroupKernelInterfaceCuda_core::GetP2PIntraWorkspace().release();
+        });
+#endif
         starpu_shutdown();
     }
 

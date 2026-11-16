@@ -13,6 +13,8 @@ class TbfSmStarpuCallbacksCuda{
 public:
 #ifdef TBFMM_USE_GPU_COARSENING
 #include "tbfm2lgroupcallbacks.hpp"
+#include "tbfp2pgroupcallbacks.hpp"
+#include "tbfp2pintracallbacks.hpp"
 #endif
     template<class ThisClass, class CellContainerClass, class ParticleContainerClass>
     static void P2MCallback(void *buffers[], void *cl_arg){

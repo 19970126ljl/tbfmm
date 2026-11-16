@@ -151,6 +151,8 @@ __global__ void M2L_core(const long int level, typename KernelClass::CudaKernelD
 
 #ifdef TBFMM_USE_GPU_COARSENING
 #include "tbfm2lgroupcuda.hpp"
+#include "tbfp2pgroupcuda.hpp"
+#include "tbfp2pintracuda.hpp"
 #endif
 
 template <class SpaceIndexType, class KernelClass, class CellGroupClass>
