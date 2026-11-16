@@ -36,6 +36,9 @@ protected:
     using VecOfIndexes = std::vector<TbfXtoXInteraction<typename SpaceIndexType::IndexType>>;
     std::list<VecOfIndexes> vecIndexBuffer;
     TbfStarpuCudaOptions cudaOptions;
+#ifdef TBFMM_USE_GPU_COARSENING
+    starpu_coarsened_variant m2lBetweenVariant{},m2lInsideVariant{};
+#endif
 
 
     starpu_codelet p2m_cl;
@@ -189,6 +192,9 @@ protected:
         m2l_cl_between_groups.modes[2] = STARPU_R;
         m2l_cl_between_groups.modes[3] = starpu_data_access_mode(STARPU_RW|STARPU_COMMUTE);
         m2l_cl_between_groups.name = "m2l_cl_between_groups";
+#ifdef TBFMM_USE_GPU_COARSENING
+        if(cudaOptions.m2l()){m2lBetweenVariant=TbfSmStarpuCallbacksCuda::M2LVariant<ThisClass,CellContainerClass,true>(cudaOptions);m2l_cl_between_groups.coarsened_variant=&m2lBetweenVariant;}
+#endif
 
         memset(&m2l_cl_inside, 0, sizeof(m2l_cl_inside));
         if constexpr(KernelCapabilities::CpuM2L){
@@ -206,6 +212,9 @@ protected:
         m2l_cl_inside.modes[1] = STARPU_R;
         m2l_cl_inside.modes[2] = starpu_data_access_mode(STARPU_RW|STARPU_COMMUTE);
         m2l_cl_inside.name = "m2l_cl_inside";
+#ifdef TBFMM_USE_GPU_COARSENING
+        if(cudaOptions.m2l()){m2lInsideVariant=TbfSmStarpuCallbacksCuda::M2LVariant<ThisClass,CellContainerClass,false>(cudaOptions);m2l_cl_inside.coarsened_variant=&m2lInsideVariant;}
+#endif
 
         p2m_cl_model.type = STARPU_HISTORY_BASED;
         p2m_cl_model.symbol = "p2m_cl";
@@ -638,6 +647,9 @@ public:
         starpu_task_wait_for_all();
         TbStarPUUtils::ExecOnWorkers(STARPU_CUDA, [&](){
             TbfGroupKernelInterfaceCuda_core::GetM2LWorkspace().release();
+#ifdef TBFMM_USE_GPU_COARSENING
+            TbfGroupKernelInterfaceCuda_core::GetM2LGroupWorkspace().release();
+#endif
         });
         if constexpr(KernelCapabilities::HasCudaRelease){
             TbStarPUUtils::ExecOnWorkers(STARPU_CUDA, [&](){

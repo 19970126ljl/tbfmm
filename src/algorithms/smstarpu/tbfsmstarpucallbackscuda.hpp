@@ -4,10 +4,16 @@
 #include <cstddef>
 #include <starpu.h>
 #include "tbfsmstarpucudaoptions.hpp"
+#ifdef TBFMM_USE_GPU_COARSENING
+#include <starpu_coarsening.h>
+#endif
 
 
 class TbfSmStarpuCallbacksCuda{
 public:
+#ifdef TBFMM_USE_GPU_COARSENING
+#include "tbfm2lgroupcallbacks.hpp"
+#endif
     template<class ThisClass, class CellContainerClass, class ParticleContainerClass>
     static void P2MCallback(void *buffers[], void *cl_arg){
         ThisClass* thisptr;
