@@ -100,6 +100,10 @@ make
 
 ## Reproducible CPU build and tests
 
+The optional [GPU task coarsening comparison](benchmarks/gpu-coarsening/README.md)
+provides separate performance/validation executables and explicit
+`single`, `m2l`, `p2p`, and `both` modes with an extended StarPU runtime.
+
 Use a fresh build directory when changing compilers or enabling CUDA. A small
 CPU configuration with no third-party runtime or vectorization dependency is:
 

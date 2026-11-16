@@ -52,6 +52,7 @@ option(TBFMM_ENABLE_STARPU "Enable StarPU when configured" ON)
 option(TBFMM_ENABLE_INASTEMP "Enable Inastemp when available" ON)
 option(TBFMM_ENABLE_OPENMP "Enable OpenMP when available" ON)
 option(TBFMM_ENABLE_FFTW "Enable FFTW when available" ON)
+option(TBFMM_BUILD_GPU_COARSENING "Build explicit GPU coarsening comparison and validation executables" OFF)
 
 set(TBF_USE_LIST "")
 set(TBF_USE_LIST_AVAILABLE "")
@@ -140,7 +141,9 @@ if(TBFMM_USE_STARPU)
         set(TBFMM_STARPU_VERSION "1.4" CACHE STRING "Set to starpu version to look at the inalude dir and set the lib name"  )
         message(STATUS "TBFMM_STARPU_VERSION = ${TBFMM_STARPU_VERSION}")
 		
-	    INCLUDE_DIRECTORIES(${TBFMM_USE_STARPU}/include/starpu/${TBFMM_STARPU_VERSION}/)
+	    set(TBFMM_STARPU_INCLUDE_DIRS "${TBFMM_USE_STARPU}/include/starpu/${TBFMM_STARPU_VERSION}"
+            CACHE STRING "StarPU include directories (semicolon separated)")
+	    INCLUDE_DIRECTORIES(${TBFMM_STARPU_INCLUDE_DIRS})
 	    link_directories("${TBFMM_USE_STARPU}/lib/")
 	    list(APPEND TBFMM_LIBRARIES starpu-${TBFMM_STARPU_VERSION})
 
@@ -327,6 +330,10 @@ endforeach()
 
 option(BUILD_TESTS "Should be ON to enable unit tests" OFF)
 
+if(TBFMM_BUILD_GPU_COARSENING)
+    add_subdirectory(benchmarks/gpu-coarsening)
+endif()
+
 if( BUILD_TESTS )
     list(APPEND TBF_USE_LIST_AVAILABLE IMPOSSIBLE_LIB)
 
@@ -335,5 +342,3 @@ if( BUILD_TESTS )
     enable_testing()
     add_subdirectory(unit-tests)
 endif()
-
-
