@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <starpu.h>
+#include "tbfsmstarpucudaoptions.hpp"
 
 
 class TbfSmStarpuCallbacksCuda{
@@ -84,6 +85,7 @@ public:
 
     template<class ThisClass, class ParticleContainerClass>
     static void P2POneLeafCallback(void *buffers[], void *cl_arg){
+
         ThisClass* thisptr;
         typename ThisClass::VecOfIndexes* indexesForGroup_first;
         unsigned char* particleDataCpu;
@@ -151,6 +153,7 @@ public:
 
     template<class ThisClass, class CellContainerClass>
     static void M2LCallback(void *buffers[], void *cl_arg){
+
         ThisClass* thisptr;
         int idxLevel;
         typename ThisClass::VecOfIndexes* indexesForGroup_first;
@@ -183,14 +186,15 @@ public:
         thisptr->kernelWrapperCuda.M2LBetweenGroups(starpu_cuda_get_local_stream(),
                                                     idxLevel, thisptr->kernels[starpu_worker_get_id()],
                                                     groupTargetCpu, groupSrcCpu,
-                                                    groupTargetCuda, groupSrcCuda, *indexesForGroup_first);
+                                                    groupTargetCuda, groupSrcCuda, *indexesForGroup_first, true);
     }
 
     template<class ThisClass, class CellContainerClass>
     static void M2LInnerCallback(void *buffers[], void *cl_arg){
+
         ThisClass* thisptr;
         int idxLevel;
-        typename ThisClass::VecOfIndexes* indexesForGroup_first;        
+        typename ThisClass::VecOfIndexes* indexesForGroup_first;
         unsigned char* groupCellsData;
         size_t groupCellsDataSize;
         starpu_codelet_unpack_args(cl_arg, &thisptr, &idxLevel, &indexesForGroup_first, &groupCellsData, &groupCellsDataSize);
@@ -211,7 +215,7 @@ public:
 
         thisptr->kernelWrapperCuda.M2LInGroup(starpu_cuda_get_local_stream(),
                                               idxLevel, thisptr->kernels[starpu_worker_get_id()],
-                                              currentGroupCpu, currentGroupCuda, *indexesForGroup_first);
+                                              currentGroupCpu, currentGroupCuda, *indexesForGroup_first, true);
     }
 
     template<class ThisClass, class CellContainerClass>

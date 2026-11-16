@@ -8,6 +8,7 @@
 #include "spacial/tbfspacialconfiguration.hpp"
 #include "algorithms/tbfalgorithmutils.hpp"
 #include "tbfsmstarpucallbacks.hpp"
+#include "tbfsmstarpucudaoptions.hpp"
 #include "tbfsmstarpucallbackscuda.hpp"
 
 #include <cassert>
@@ -34,6 +35,8 @@ protected:
 
     using VecOfIndexes = std::vector<TbfXtoXInteraction<typename SpaceIndexType::IndexType>>;
     std::list<VecOfIndexes> vecIndexBuffer;
+    TbfStarpuCudaOptions cudaOptions;
+
 
     starpu_codelet p2m_cl;
     starpu_perfmodel p2m_cl_model{};
@@ -153,7 +156,6 @@ protected:
         p2p_cl_oneleaf.modes[0] = STARPU_R;
         p2p_cl_oneleaf.modes[1] = starpu_data_access_mode(STARPU_RW|STARPU_COMMUTE);
         p2p_cl_oneleaf.name = "p2p_cl_oneleaf";
-
         memset(&p2p_cl_twoleaves, 0, sizeof(p2p_cl_twoleaves));
         if constexpr(KernelCapabilities::CpuP2P){
             p2p_cl_twoleaves.cpu_funcs[0] = &TbfSmStarpuCallbacks::P2PBetweenLeavesCallback<ThisClass, ParticleContainerClass>;
@@ -170,7 +172,6 @@ protected:
         p2p_cl_twoleaves.modes[2] = STARPU_R;
         p2p_cl_twoleaves.modes[3] = starpu_data_access_mode(STARPU_RW|STARPU_COMMUTE);
         p2p_cl_twoleaves.name = "p2p_cl_twoleaves";
-
         memset(&m2l_cl_between_groups, 0, sizeof(m2l_cl_between_groups));
         if constexpr(KernelCapabilities::CpuM2L){
             m2l_cl_between_groups.cpu_funcs[0] = &TbfSmStarpuCallbacks::M2LCallback<ThisClass, CellContainerClass>;
@@ -179,6 +180,7 @@ protected:
         if constexpr(KernelCapabilities::CudaM2L){
             m2l_cl_between_groups.cuda_funcs[0] = &TbfSmStarpuCallbacksCuda::M2LCallback<ThisClass, CellContainerClass>;
             m2l_cl_between_groups.where |= STARPU_CUDA;
+            m2l_cl_between_groups.cuda_flags[0] = STARPU_CUDA_ASYNC;
         }
         static_assert(KernelCapabilities::CpuM2L || KernelCapabilities::CudaM2L, "At least one should be enabled.");
         m2l_cl_between_groups.nbuffers = 4;
@@ -196,6 +198,7 @@ protected:
         if constexpr(KernelCapabilities::CudaM2L){
             m2l_cl_inside.cuda_funcs[0] = &TbfSmStarpuCallbacksCuda::M2LInnerCallback<ThisClass, CellContainerClass>;
             m2l_cl_inside.where |= STARPU_CUDA;
+            m2l_cl_inside.cuda_flags[0] = STARPU_CUDA_ASYNC;
         }
         static_assert(KernelCapabilities::CpuM2L | KernelCapabilities::CudaM2L, "At least one should be enabled.");
         m2l_cl_inside.nbuffers = 3;
@@ -509,18 +512,12 @@ protected:
     template <class TreeClass>
     void P2P(TreeClass& inTree, ParticleHandleContainer& particleHandles){
         const auto& spacialSystem = inTree.getSpacialSystem();
-
         auto& particleGroups = inTree.getParticleGroups();
+        using NeighborLists = decltype(spacialSystem.getNeighborListForBlock(particleGroups.front(), configuration.getTreeHeight()-1, true));
+        using CrossIndexes = typename NeighborLists::second_type;
 
-        auto currentParticleGroup = particleGroups.begin();
-        const auto endParticleGroup = particleGroups.end();
-
-        int idxGroup = 0;
-
-        while(currentParticleGroup != endParticleGroup){
-
-            auto indexesForGroup = spacialSystem.getNeighborListForBlock(*currentParticleGroup, configuration.getTreeHeight()-1, true);
-            TbfAlgorithmUtils::TbfMapIndexesAndBlocksIndexes(std::move(indexesForGroup.second), particleGroups, std::distance(particleGroups.begin(), currentParticleGroup),
+        auto submitCross = [&](CrossIndexes&& crossIndexes, int idxGroup){
+            TbfAlgorithmUtils::TbfMapIndexesAndBlocksIndexes(std::move(crossIndexes), particleGroups, idxGroup,
                                                              [&](auto& groupTargetIdx, auto& groupSrcIdx, const auto& indexes){
                                                                  auto* thisptr = this;
                                                                  vecIndexBuffer.push_back(indexes.toStdVector());
@@ -545,8 +542,10 @@ protected:
                                                                                     0);
                                                              });
 
+        };
+        auto submitIntra = [&](VecOfIndexes&& intraIndexes, int idxGroup){
             auto* thisptr = this;
-            vecIndexBuffer.push_back(std::move(indexesForGroup.first));
+            vecIndexBuffer.push_back(std::move(intraIndexes));
             VecOfIndexes* indexesForGroup_firstPtr = &vecIndexBuffer.back();
             unsigned char* groupData = inTree.getParticleGroups()[idxGroup].getDataPtr();
             size_t groupDataSize = inTree.getParticleGroups()[idxGroup].getDataSize();
@@ -561,8 +560,12 @@ protected:
                                STARPU_NAME, "P2P",
                                0);
 
-            ++currentParticleGroup;
-            ++idxGroup;
+        };
+
+        for(size_t idxGroup=0;idxGroup<particleGroups.size();++idxGroup){
+            auto indexes=spacialSystem.getNeighborListForBlock(particleGroups[idxGroup], configuration.getTreeHeight()-1, true);
+            submitCross(std::move(indexes.second),idxGroup);
+            submitIntra(std::move(indexes.first),idxGroup);
         }
     }
 
@@ -573,14 +576,15 @@ protected:
     }
 
 public:
-    explicit TbfSmStarpuAlgorithmCuda(const SpacialConfiguration& inConfiguration, const long int inStopUpperLevel = TbfDefaultLastLevel)
-        : configuration(inConfiguration), spaceSystem(configuration), stopUpperLevel(std::max(0L, inStopUpperLevel)),
+    explicit TbfSmStarpuAlgorithmCuda(const SpacialConfiguration& inConfiguration, const long int inStopUpperLevel = TbfDefaultLastLevel, const TbfStarpuCudaOptions& options = {})
+        : cudaOptions(options), configuration(inConfiguration), spaceSystem(configuration), stopUpperLevel(std::max(0L, inStopUpperLevel)),
         kernelWrapper(configuration), kernelWrapperCuda(configuration),
         priorities(configuration.getTreeHeight()){
         kernels.emplace_back(configuration);
 
-        [[maybe_unused]] const int ret = starpu_init(NULL);
-        assert(ret == 0);
+        cudaOptions.validate();
+        const int ret = starpu_init(cudaOptions.runtime);
+        if(ret)throw std::runtime_error("StarPU initialization failed: "+std::to_string(ret));
 
         pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
         TbStarPUUtils::ExecOnWorkers(STARPU_CUDA|STARPU_CPU, [&](){
@@ -602,14 +606,15 @@ public:
     template <class SourceKernelClass,
              typename = typename std::enable_if<!std::is_same<long int, typename std::remove_const<typename std::remove_reference<SourceKernelClass>::type>::type>::value
                                                     && !std::is_same<int, typename std::remove_const<typename std::remove_reference<SourceKernelClass>::type>::type>::value, void>::type>
-    TbfSmStarpuAlgorithmCuda(const SpacialConfiguration& inConfiguration, SourceKernelClass&& inKernel, const long int inStopUpperLevel = TbfDefaultLastLevel)
-        : configuration(inConfiguration), spaceSystem(configuration), stopUpperLevel(std::max(0L, inStopUpperLevel)),
+    TbfSmStarpuAlgorithmCuda(const SpacialConfiguration& inConfiguration, SourceKernelClass&& inKernel, const long int inStopUpperLevel = TbfDefaultLastLevel, const TbfStarpuCudaOptions& options = {})
+        : cudaOptions(options), configuration(inConfiguration), spaceSystem(configuration), stopUpperLevel(std::max(0L, inStopUpperLevel)),
         kernelWrapper(configuration), kernelWrapperCuda(configuration),
         priorities(configuration.getTreeHeight()){
         kernels.emplace_back(std::forward<SourceKernelClass>(inKernel));
 
-        [[maybe_unused]] const int ret = starpu_init(NULL);
-        assert(ret == 0);
+        cudaOptions.validate();
+        const int ret = starpu_init(cudaOptions.runtime);
+        if(ret)throw std::runtime_error("StarPU initialization failed: "+std::to_string(ret));
 
         pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
         TbStarPUUtils::ExecOnWorkers(STARPU_CUDA|STARPU_CPU, [&](){
@@ -630,6 +635,10 @@ public:
 
     ~TbfSmStarpuAlgorithmCuda(){
         starpu_resume();
+        starpu_task_wait_for_all();
+        TbStarPUUtils::ExecOnWorkers(STARPU_CUDA, [&](){
+            TbfGroupKernelInterfaceCuda_core::GetM2LWorkspace().release();
+        });
         if constexpr(KernelCapabilities::HasCudaRelease){
             TbStarPUUtils::ExecOnWorkers(STARPU_CUDA, [&](){
                 kernels[starpu_worker_get_id()].releaseCudaKernelData(starpu_cuda_get_local_stream());

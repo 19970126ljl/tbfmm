@@ -6,6 +6,10 @@
 
 #include <cassert>
 #include <cuda_runtime.h>
+#include <algorithm>
+#include <array>
+#include <cstdint>
+#include <stdexcept>
 
 #include <vector>
 #include <utility>
@@ -101,6 +105,9 @@ struct M2LInteraction {
     long int direction;
 };
 
+#include "tbfm2lprepare.hpp"
+#include "tbfm2lworkspacecuda.hpp"
+
 template <class CellGroupClass>
 struct M2LNeighbors {
     const CellGroupClass* group;
@@ -141,6 +148,7 @@ __global__ void M2L_core(const long int level, typename KernelClass::CudaKernelD
                             targets.getCellLocal(target));
     }
 }
+
 
 template <class SpaceIndexType, class KernelClass, class CellGroupClass>
 __global__ void L2L_core(const SpaceIndexType& spaceSystem, const long int inLevel,
@@ -426,53 +434,34 @@ public:
     template <class KernelClass, class CellGroupClass, class IndexClass>
     void M2LInGroup(cudaStream_t currentStream,
                     const long int inLevel, KernelClass& inKernel, const CellGroupClass& inCellGroup,
-                    CellGroupClass& inCellGroupCuda, const IndexClass& inIndexes) const {
+                    CellGroupClass& inCellGroupCuda, const IndexClass& inIndexes, const bool asynchronous = false) const {
         M2LBetweenGroups(currentStream, inLevel, inKernel, inCellGroup, inCellGroup,
-                         inCellGroupCuda, inCellGroupCuda, inIndexes);
+                         inCellGroupCuda, inCellGroupCuda, inIndexes, asynchronous);
     }
 
     template <class KernelClass, class CellGroupClassTarget, class CellGroupClassSource, class IndexClass>
     void M2LBetweenGroups(cudaStream_t currentStream,
                           const long int inLevel, KernelClass& inKernel, const CellGroupClassTarget& inCellGroup,
                           const CellGroupClassSource& inOtherCellGroup, CellGroupClassTarget& inCellGroupCuda,
-                          const CellGroupClassSource& inOtherCellGroupCuda, const IndexClass& inIndexes) const {
-        using Interaction = TbfGroupKernelInterfaceCuda_core::M2LInteraction;
-        std::vector<Interaction> interactions;
-        interactions.reserve(inIndexes.size());
-        for(const auto& interaction : inIndexes){
-            const auto source = inOtherCellGroup.getElementFromSpacialIndex(interaction.indexSrc);
-            if(!source) continue; // Sparse groups can contain gaps in their index range.
-            const auto target = inCellGroup.getElementFromSpacialIndex(interaction.indexTarget);
-            assert(target && *target == interaction.globalTargetPos);
-            assert(interaction.arrayIndexSrc >= 0 && interaction.arrayIndexSrc < 343);
-            interactions.push_back({*source, *target, interaction.arrayIndexSrc});
-        }
-        if(interactions.empty()) return;
-
-        std::stable_sort(interactions.begin(), interactions.end(), [](const auto& a, const auto& b){
-            return a.target < b.target;
-        });
-        std::vector<long int> offsets{0};
-        for(long int idx = 1; idx < static_cast<long int>(interactions.size()); ++idx){
-            if(interactions[idx].target != interactions[idx-1].target) offsets.push_back(idx);
-        }
-        offsets.push_back(static_cast<long int>(interactions.size()));
+                          const CellGroupClassSource& inOtherCellGroupCuda, const IndexClass& inIndexes, const bool asynchronous = false) const {
+        auto& slot = TbfGroupKernelInterfaceCuda_core::GetM2LWorkspace().acquire();
+        auto& interactions = slot.interactions;
+        auto& offsets=slot.offsets;
+        TbfGroupKernelInterfaceCuda_core::PrepareM2LLinear(inOtherCellGroup,inCellGroup,inIndexes,interactions,offsets);
+        if(interactions.empty())return;
         const long int nbTargets = static_cast<long int>(offsets.size())-1;
-        auto deviceInteractions = MakeDeviceUniquePtr(interactions, currentStream);
-        auto deviceOffsets = MakeDeviceUniquePtr(offsets, currentStream);
+        slot.upload(currentStream);
+        const auto* interactionsPtr = slot.deviceInteractions;
+        const auto* offsetsPtr = slot.deviceOffsets;
         const int nbBlocks = static_cast<int>(std::min(nbTargets, 65535L));
         TbfGroupKernelInterfaceCuda_core::M2L_core<KernelClass, CellGroupClassTarget, CellGroupClassSource>
             <<<nbBlocks,128,0,currentStream>>>(inLevel, inKernel.getCudaKernelData(),
                                              inCellGroupCuda.getDataPtrsAndSizes(),
                                              inOtherCellGroupCuda.getDataPtrsAndSizes(),
-                                             deviceInteractions.device_ptr(), deviceOffsets.device_ptr(), nbTargets);
+                                             interactionsPtr, offsetsPtr, nbTargets);
         CUDA_ASSERT(cudaGetLastError());
-        deviceInteractions.release();
-        deviceOffsets.release();
-        // These codelets use StarPU's synchronous CUDA completion contract.
-        // Finish both the kernel and metadata transfers before host staging dies
-        // and before StarPU releases readers/writers of the target handle.
-        CUDA_ASSERT(cudaStreamSynchronize(currentStream));
+        slot.record(currentStream);
+        if(!asynchronous) slot.release();
     }
 
     template <class KernelClass, class CellGroupClass>
@@ -640,12 +629,6 @@ public:
                 assert(inOtherParticleGroup.getLeafSymbData(*foundSrc).spaceIndex == interaction.indexSrc);
                 assert(inParticleGroup.getLeafSymbData(interaction.globalTargetPos).spaceIndex == interaction.indexTarget);
 
-                if(previousTarget != interaction.indexTarget){
-                    indexesIntervals.emplace_back(indexesFull.size());
-                    previousTarget = interaction.indexTarget;
-                }
-
-                indexesIntervals.back() += 1;
                 indexesFull.emplace_back(IndexTypeFull{interaction.globalTargetPos,
                                                        interaction.indexTarget, interaction.indexSrc, *foundSrc,
                                                        interaction.arrayIndexSrc});
@@ -655,6 +638,19 @@ public:
         if(indexesFull.empty()){
             return;
         }
+        // Keep all updates for a target in one CUDA block.
+        std::stable_sort(indexesFull.begin(), indexesFull.end(), [](const auto& a, const auto& b){
+            return a.indexTarget < b.indexTarget;
+        });
+        indexesIntervals.clear();
+        previousTarget = -1;
+        for(long int i = 0; i < static_cast<long int>(indexesFull.size()); ++i){
+            if(indexesFull[i].indexTarget != previousTarget){
+                indexesIntervals.push_back(i);
+                previousTarget = indexesFull[i].indexTarget;
+            }
+        }
+        indexesIntervals.push_back(static_cast<long int>(indexesFull.size()));
         assert(indexesIntervals.size() >= 2);
 
         auto indexesFullCuda = MakeDeviceUniquePtr(indexesFull,currentStream);
